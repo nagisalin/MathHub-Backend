@@ -9,7 +9,17 @@ import authRoutes from './routes/auth_routes.js'
 dotenv.config()
 
 const app: Express = express()
-app.use(cors())
+
+// CORS 設定：使用 credentials 時必須指定具體的 origin
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',') 
+    : ['http://localhost:3000', 'http://localhost:5173'];
+
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true, // 允許攜帶 Cookie
+}))
+
 app.use(express.json())
 app.use(cookieParser())
 
