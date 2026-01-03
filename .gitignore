@@ -38,6 +38,9 @@ bower_components
 # Compiled binary addons (https://nodejs.org/api/addons.html)
 build/Release
 
+# TypeScript build output
+build/
+
 # Dependency directories
 node_modules/
 jspm_packages/
@@ -138,6 +141,7 @@ dist/
 .env
 
 .DS_store
-Frontend/client/
-client/
 .other/
+
+# Server config files (contain sensitive data like DB passwords)
+server/config/**/index.ts
