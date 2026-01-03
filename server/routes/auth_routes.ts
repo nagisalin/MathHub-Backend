@@ -2,122 +2,226 @@ import express, { Router, Request, Response } from 'express'
 import { pool } from '../modules/db.js'
 import { QueryResult } from 'pg'
 import crypto from 'node:crypto'
-import { AuthTokenPayload, createRSAToken, parseRSAToken, TokenName, validateAuthToken, verifyRSAToken } from '../modules/token.js'
+import { AuthTokenPayload, createRSAToken, TokenName, validateAuthToken } from '../modules/token.js'
 import { HttpError, HttpStatusCode } from '../modules/http_status_code.js'
 
 const router: Router = express.Router()
 
-// 新用戶註冊函式
-// 先檢查資料庫中是否存在重複的用戶名稱，之後再將密碼進行雜湊處理後寫入資料庫
-// 最後將 auth_token 傳送到前端，供後續的身份驗證使用
-router.post('/register', async (req: Request<{}, {}, { username: string, password: string }>, res: Response) => {
+// 密碼格式驗證：至少8位，最長64位，至少一個大寫字母和一個特殊字元
+const PASSWORD_FORMAT: RegExp = /^(?=.*[A-Z])(?=.*[!"#$%&'()*+,-./:;<=>?@^_`{|}~])[a-zA-Z0-9!"#$%&'()*+,-./:;<=>?@^_`{|}~]{8,64}$/
+
+// 電子郵件格式驗證
+const EMAIL_FORMAT: RegExp = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+/**
+ * 格式化用戶資料回應
+ */
+function formatUserResponse(user: any) {
+    return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        permissionList: user.permission_list || [],
+        birthday: user.birthday ? Number(user.birthday) : null,
+        grade: user.grade || null,
+        isActive: user.is_active,
+        createdAt: user.created_at ? new Date(user.created_at).getTime() : null,
+        updatedAt: user.updated_at ? new Date(user.updated_at).getTime() : null
+    }
+}
+
+/**
+ * 回傳成功回應
+ */
+function successResponse(res: Response, data: any, statusCode: number = 200) {
+    res.status(statusCode).json({
+        success: true,
+        data
+    })
+}
+
+/**
+ * 回傳失敗回應
+ */
+function errorResponse(res: Response, message: string, statusCode: number = 400) {
+    res.status(statusCode).json({
+        message,
+        status: 'failed',
+        data: {}
+    })
+}
+
+/**
+ * 用戶註冊
+ * POST /auth/register
+ */
+router.post('/register', async (req: Request<{}, {}, { email: string, name: string, password: string }>, res: Response) => {
     try {
-        const { username, password }: { username: string, password: string } = req.body
+        const { email, name, password } = req.body
 
-        // 驗證用戶名稱和密碼格式
-        const username_valid_format: RegExp = /^[a-zA-Z0-9](?:[a-zA-Z0-9_]{3,62})[a-zA-Z0-9]$/  // 英文字母、數字、底線組成用戶名稱，其中開頭和結尾不可以是底線，最短5位、最長64位
-        const password_valid_format: RegExp = /^(?=.*[A-Z])(?=.*[!"#$%&'()*+,-./:;<=>?@^_`{|}~])[a-zA-Z0-9!"#$%&'()*+,-./:;<=>?@^_`{|}~]{8,64}$/ // 英文字母和數字組成密碼，至少有一個大寫英文字母、一個特殊字元，最短8位、最長64位
-        if (!username_valid_format.test(username) || !password_valid_format.test(password)) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '用戶名稱或密碼格式不正確')
+        // 驗證必填欄位
+        if (!email || !name || !password) {
+            return errorResponse(res, 'invalid params')
         }
 
-        const auth_username: QueryResult = await pool.query('SELECT username FROM test_schema.auth WHERE username = $1', [username])
-        if (auth_username.rows.length > 0) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '用戶名稱已存在')
+        // 驗證電子郵件格式
+        if (!EMAIL_FORMAT.test(email)) {
+            return errorResponse(res, '電子郵件格式不正確')
         }
 
-        const salt: crypto.BinaryLike = crypto.randomBytes(16).toString('hex')
-        const hashed_password: Buffer = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512')
+        // 驗證密碼格式
+        if (!PASSWORD_FORMAT.test(password)) {
+            return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母和一個特殊字元')
+        }
 
-        await pool.query('INSERT INTO test_schema.auth (username, password, salt) VALUES ($1, $2, $3)', [username, hashed_password, salt])
+        // 檢查電子郵件是否已存在
+        const existingUser: QueryResult = await pool.query(
+            'SELECT email FROM test_schema.auth WHERE email = $1',
+            [email]
+        )
+        if (existingUser.rows.length > 0) {
+            return errorResponse(res, '此電子郵件已被註冊')
+        }
 
-        const auth_data: QueryResult = await pool.query('SELECT role FROM test_schema.auth WHERE username = $1', [username])
-        /** @description 有效時間長度，單位為秒 */
-        const expires_in: number = 86_400
-        const payload: AuthTokenPayload = new AuthTokenPayload(username, auth_data.rows[0]['role'], Math.floor(Date.now() + expires_in * 1000))
-        const auth_token: string = createRSAToken(payload)
-        res.cookie(TokenName.AUTH, auth_token, {
-            'httpOnly': true,
-            // 'secure': true, // 只在 HTTPS 下傳輸
-            'sameSite': 'strict',
-            'maxAge': expires_in * 1000
+        // 密碼加密
+        const salt: string = crypto.randomBytes(16).toString('hex')
+        const hashedPassword: Buffer = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512')
+
+        // 新增用戶
+        const result: QueryResult = await pool.query(
+            `INSERT INTO test_schema.auth (email, name, password, salt) 
+             VALUES ($1, $2, $3, $4) 
+             RETURNING id, email, name, permission_list, birthday, grade, is_active, created_at, updated_at`,
+            [email, name, hashedPassword, salt]
+        )
+
+        const user = result.rows[0]
+
+        // 產生 Token
+        const expiresIn: number = 3600 // 1 小時
+        const payload: AuthTokenPayload = new AuthTokenPayload(
+            user.id,
+            user.permission_list?.[0] || 'user',
+            Math.floor(Date.now() + expiresIn * 1000)
+        )
+        const accessToken: string = createRSAToken(payload)
+
+        // 設定 Cookie
+        res.cookie(TokenName.AUTH, accessToken, {
+            httpOnly: true,
+            sameSite: 'strict',
+            maxAge: expiresIn * 1000
         })
 
-        res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.CREATED).send('註冊成功')
+        successResponse(res, {
+            accessToken,
+            idToken: accessToken,
+            expiresIn,
+            user: formatUserResponse(user)
+        }, 201)
     }
     catch (error) {
-        console.error(error)
-        if (error instanceof HttpError) {
-            res.status(error.status_code).send(error.message)
-            return
-        }
-
-        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
+        console.error('Register error:', error)
+        errorResponse(res, '註冊失敗，請稍後再試', 500)
     }
 })
 
-// 用戶登入函式
-router.post('/login', async (req: Request<{}, {}, { username: string, password: string }>, res: Response) => {
+/**
+ * 用戶登入
+ * POST /auth/login
+ */
+router.post('/login', async (req: Request<{}, {}, { email: string, password: string, deviceID?: string }>, res: Response) => {
     try {
-        const { username, password }: { username: string, password: string } = req.body
+        const { email, password } = req.body
 
-        const auth_data: QueryResult = await pool.query('SELECT password, salt, role FROM test_schema.auth WHERE username = $1', [username])
-        if (auth_data.rows.length === 0) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '帳號或密碼錯誤')
+        // 驗證必填欄位
+        if (!email || !password) {
+            return errorResponse(res, 'invalid params')
         }
 
-        const salt: crypto.BinaryLike = auth_data.rows[0]['salt']
-        const hashed_password: Buffer = auth_data.rows[0]['password']
-        const hashed_input_password: Buffer = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512')
+        // 查詢用戶
+        const result: QueryResult = await pool.query(
+            `SELECT id, email, name, password, salt, permission_list, birthday, grade, is_active, created_at, updated_at 
+             FROM test_schema.auth WHERE email = $1`,
+            [email]
+        )
 
-        const is_password_valid: boolean = crypto.timingSafeEqual(hashed_input_password, hashed_password)
+        if (result.rows.length === 0) {
+            return errorResponse(res, '帳號或密碼錯誤', 401)
+        }
 
-        if (is_password_valid) {
-            /** @description 有效時間長度，單位為秒 */
-            const expires_in: number = 86_400
-            const payload: AuthTokenPayload = new AuthTokenPayload(username, auth_data.rows[0]['role'], Math.floor(Date.now() + expires_in * 1000))
-            const token: string = createRSAToken(payload)
-            res.cookie(TokenName.AUTH, token, {
-                'httpOnly': true,
-                // 'secure': true, // 只在 HTTPS 下傳輸
-                'sameSite': 'strict',
-                'maxAge': expires_in * 1000
-            })
-            res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.OK).send('登入成功')
-            return
+        const user = result.rows[0]
+
+        // 檢查帳號是否啟用
+        if (!user.is_active) {
+            return errorResponse(res, '此帳號已被停用', 403)
         }
-        else {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '帳號或密碼錯誤')
+
+        // 驗證密碼
+        const hashedInputPassword: Buffer = crypto.pbkdf2Sync(password, user.salt, 100_000, 64, 'sha512')
+        const isPasswordValid: boolean = crypto.timingSafeEqual(hashedInputPassword, user.password)
+
+        if (!isPasswordValid) {
+            return errorResponse(res, '帳號或密碼錯誤', 401)
         }
+
+        // 產生 Token
+        const expiresIn: number = 3600 // 1 小時
+        const payload: AuthTokenPayload = new AuthTokenPayload(
+            user.id,
+            user.permission_list?.[0] || 'user',
+            Math.floor(Date.now() + expiresIn * 1000)
+        )
+        const accessToken: string = createRSAToken(payload)
+
+        // 設定 Cookie
+        res.cookie(TokenName.AUTH, accessToken, {
+            httpOnly: true,
+            sameSite: 'strict',
+            maxAge: expiresIn * 1000
+        })
+
+        // 更新最後登入時間
+        await pool.query(
+            'UPDATE test_schema.auth SET updated_at = NOW() WHERE id = $1',
+            [user.id]
+        )
+
+        successResponse(res, {
+            accessToken,
+            idToken: accessToken,
+            expiresIn,
+            user: formatUserResponse(user)
+        })
     }
     catch (error) {
-        console.error(error)
-        if (error instanceof HttpError) {
-            res.status(error.status_code).send(error.message)
-            return
-        }
-
-        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
+        console.error('Login error:', error)
+        errorResponse(res, '登入失敗，請稍後再試', 500)
     }
 })
 
-// 檢查 auth_token 函式
-// 正式環境可以移除此函式
+/**
+ * 驗證 Token
+ * POST /auth/verify
+ */
 router.post('/verify', (req: Request, res: Response) => {
     try {
-        const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
-        res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.OK).send(AuthTokenPayload.toString())
+        const authPayload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
+        successResponse(res, { valid: true, payload: authPayload })
     }
     catch (error) {
-        console.error(error)
-        if (error instanceof HttpError) {
-            res.status(error.status_code).send(error.message)
-            return
-        }
-
-        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
+        console.error('Verify error:', error)
+        errorResponse(res, 'Token 無效或已過期', 401)
     }
+})
+
+/**
+ * 用戶登出
+ * POST /auth/logout
+ */
+router.post('/logout', (req: Request, res: Response) => {
+    res.clearCookie(TokenName.AUTH)
+    successResponse(res, { message: '登出成功' })
 })
 
 export default router
-
