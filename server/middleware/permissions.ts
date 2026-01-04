@@ -61,6 +61,7 @@ export const PERMISSION_MIDDLEWARE: Record<string, RequestHandler> = {
     
     // 內容管理
     manageProblems: requirePermissions(['allowManageProblems']),
+    manageProblemStatus: requirePermissions(['allowManageProblemStatus']),
     manageComments: requirePermissions(['allowManageComments']),
     manageReports: requirePermissions(['allowManageReports']),
     
@@ -73,6 +74,7 @@ export const PERMISSION_MIDDLEWARE: Record<string, RequestHandler> = {
     ]),
     anyContent: requirePermissions([
         'allowManageProblems',
+        'allowManageProblemStatus',
         'allowManageComments',
         'allowManageReports'
     ]),
