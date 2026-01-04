@@ -4,20 +4,15 @@ import { QueryResult } from 'pg'
 import { QuestionType, Question, QuestionVariableType, QuestionVariable, AnswerType, Answer } from '../modules/quest.js'
 import { AuthTokenPayload, TokenName, validateAuthToken } from '../modules/token.js'
 import { HttpError, HttpStatusCode } from '../modules/http_status_code.js'
+import { PERMISSION_MIDDLEWARE } from '../middleware/permissions.js'
 import IsolatedVM from 'isolated-vm'
 
 const router: Router = express.Router()
 
 router.post('/getList', async (req: Request<{}, {}, { begin: number, end: number }>, res: Response) => {
     try {
-        // Token 驗證
+        // Token 驗證（任何登入用戶都可查看題目列表）
         const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
-
-        // 用戶組驗證
-        const role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '一般使用者'")
-        if (auth_payload.role < role_result.rows[0].id) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
-        }
 
         // 查詢題目資料
         const begin: number = req.body.begin
@@ -55,14 +50,8 @@ router.post('/getQuest', async (req: Request<{}, {}, { quest_id: string }>, res:
     const isolate: IsolatedVM.Isolate = new IsolatedVM.Isolate({ memoryLimit: 128 })
 
     try {
-        // Token 驗證
+        // Token 驗證（任何登入用戶都可查看題目）
         const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
-
-        // 用戶組驗證
-        const role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '一般使用者'")
-        if (auth_payload.role < role_result.rows[0].id) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
-        }
 
         // 查詢題目內容
         const quest_id: string = req.body.quest_id
@@ -117,14 +106,8 @@ router.post('/answerQuest', async (req: Request<{}, {}, { quest_id: string, ques
     const isolate: IsolatedVM.Isolate = new IsolatedVM.Isolate({ memoryLimit: 128 })
 
     try {
-        // Token 驗證
+        // Token 驗證（任何登入用戶都可回答題目）
         const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
-
-        // 用戶組驗證
-        const role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '一般使用者'")
-        if (auth_payload.role < role_result.rows[0].id) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
-        }
 
         // 查詢解答資料
         const { quest_id, question_var = [], answer = [] } = req.body
@@ -178,16 +161,10 @@ router.post('/answerQuest', async (req: Request<{}, {}, { quest_id: string, ques
     }
 })
 
-router.post('/newQuest', async (req: Request<{}, {}, { code: string, title: string, question: { type: string, content: string }[], question_var: { type: string, sign: string, content: string }[], answer: { type: string, content: string }[], tags: string[] }>, res: Response) => {
+router.post('/newQuest', PERMISSION_MIDDLEWARE.manageProblems, async (req: Request<{}, {}, { code: string, title: string, question: { type: string, content: string }[], question_var: { type: string, sign: string, content: string }[], answer: { type: string, content: string }[], tags: string[] }>, res: Response) => {
     try {
-        // Token 驗證
+        // Token 驗證（已在 middleware 中完成）
         const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
-
-        // 用戶組驗證
-        const admin_role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '管理員'")
-        if (auth_payload.role < admin_role_result.rows[0].id) {
-            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
-        }
 
         // 檢查題目資料
         const { code, title, question = [], question_var = [], answer = [] } = req.body
