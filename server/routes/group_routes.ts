@@ -5,6 +5,27 @@ import { validateAuthToken, TokenName } from '../modules/token.js';
 
 const router: Router = express.Router();
 
+// 系統所有可用權限定義
+const AVAILABLE_PERMISSIONS = [
+    {
+        id: 'allowManagePermissions',
+        name: '管理權限',
+        description: '可以進入後台並編輯群組權限設定',
+        category: 'admin'
+    },
+    // 之後擴充其他權限時加在這裡
+];
+
+/**
+ * GET /groups/permissions/available - 取得系統所有可用權限
+ */
+router.get('/permissions/available', (req: Request, res: Response) => {
+    res.json({
+        success: true,
+        data: AVAILABLE_PERMISSIONS
+    });
+});
+
 /**
  * Middleware: 驗證是否有管理權限
  */
