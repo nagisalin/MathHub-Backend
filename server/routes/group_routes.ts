@@ -78,7 +78,7 @@ router.get('/permissions/available', PERMISSION_MIDDLEWARE.managePermissions, (r
 });
 
 /**
- * GET /groups - 取得所有群組
+ * GET /groups - 取得所有群組（排除最高管理員群組）
  */
 router.get('/', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
 	try {
@@ -93,6 +93,7 @@ router.get('/', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, re
                 COUNT(a.id) as member_count
              FROM test_schema.groups g
              LEFT JOIN test_schema.auth a ON a.group_id = g.id
+             WHERE g.is_super_admin = false
              GROUP BY g.id, g.name, g.description, g.permissions, g.created_at, g.updated_at
              ORDER BY g.created_at ASC`
 		);
@@ -133,32 +134,177 @@ router.get('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request,
 });
 
 /**
- * PUT /groups/:id - 更新群組權限
+ * POST /groups - 建立新群組
+ */
+router.post(
+	'/',
+	PERMISSION_MIDDLEWARE.managePermissions,
+	async (req: Request<{}, {}, { name: string; description?: string }>, res: Response) => {
+		try {
+			const { name, description } = req.body;
+
+			if (!name || typeof name !== 'string' || name.trim().length === 0) {
+				return res.status(400).json({ success: false, message: '群組名稱不能為空' });
+			}
+
+			// 檢查群組名稱是否已存在
+			const existingGroup: QueryResult = await pool.query('SELECT id FROM test_schema.groups WHERE name = $1', [
+				name.trim(),
+			]);
+			if (existingGroup.rows.length > 0) {
+				return res.status(400).json({ success: false, message: '群組名稱已存在' });
+			}
+
+			// 建立新群組（預設無權限）
+			const result: QueryResult = await pool.query(
+				`INSERT INTO test_schema.groups (name, description, permissions)
+             VALUES ($1, $2, $3)
+             RETURNING id, name, description, permissions, created_at, updated_at`,
+				[name.trim(), description || null, []]
+			);
+
+			res.status(201).json({
+				success: true,
+				data: {
+					...result.rows[0],
+					member_count: 0,
+				},
+			});
+		} catch (error) {
+			console.error('Create group error:', error);
+			res.status(500).json({ success: false, message: '建立群組失敗' });
+		}
+	}
+);
+
+/**
+ * PUT /groups/:id - 更新群組（名稱、描述、權限）
  */
 router.put('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
 	try {
-		const { permissions, description } = req.body;
+		const groupId = req.params.id;
+		const { name, description, permissions } = req.body;
 
-		if (!Array.isArray(permissions)) {
-			return res.status(400).json({ success: false, message: '權限格式錯誤' });
+		// 檢查群組是否存在
+		const existingGroup: QueryResult = await pool.query('SELECT is_super_admin FROM test_schema.groups WHERE id = $1', [
+			groupId,
+		]);
+		if (existingGroup.rows.length === 0) {
+			return res.status(404).json({ success: false, message: '群組不存在' });
 		}
 
+		const isSuperAdminGroup = existingGroup.rows[0].is_super_admin === true;
+
+		// 如果更新的是最高管理員群組，必須保留 allowManagePermissions 權限
+		if (isSuperAdminGroup && Array.isArray(permissions)) {
+			if (!permissions.includes('allowManagePermissions')) {
+				return res.status(400).json({
+					success: false,
+					message: '最高管理員群組必須保留管理權限',
+				});
+			}
+		}
+
+		// 建立更新欄位
+		const updates: string[] = [];
+		const params: any[] = [];
+		let paramIndex = 1;
+
+		if (name !== undefined && typeof name === 'string' && name.trim().length > 0) {
+			// 檢查新名稱是否與其他群組重複
+			const nameCheck: QueryResult = await pool.query(
+				'SELECT id FROM test_schema.groups WHERE name = $1 AND id != $2',
+				[name.trim(), groupId]
+			);
+			if (nameCheck.rows.length > 0) {
+				return res.status(400).json({ success: false, message: '群組名稱已存在' });
+			}
+
+			updates.push(`name = $${paramIndex}`);
+			params.push(name.trim());
+			paramIndex++;
+		}
+
+		if (description !== undefined) {
+			updates.push(`description = $${paramIndex}`);
+			params.push(description || null);
+			paramIndex++;
+		}
+
+		if (Array.isArray(permissions)) {
+			updates.push(`permissions = $${paramIndex}`);
+			params.push(permissions);
+			paramIndex++;
+		}
+
+		if (updates.length === 0) {
+			return res.status(400).json({ success: false, message: '沒有要更新的欄位' });
+		}
+
+		updates.push(`updated_at = NOW()`);
+		params.push(groupId);
+
+		// 更新群組
 		const result: QueryResult = await pool.query(
 			`UPDATE test_schema.groups 
-             SET permissions = $1, description = $2, updated_at = NOW()
-             WHERE id = $3
-             RETURNING id, name, description, permissions, updated_at`,
-			[permissions, description, req.params.id]
+             SET ${updates.join(', ')}
+             WHERE id = $${paramIndex}
+             RETURNING id, name, description, permissions, created_at, updated_at`,
+			params
 		);
+
+		// 取得成員數量
+		const memberCountResult: QueryResult = await pool.query(
+			'SELECT COUNT(*) as count FROM test_schema.auth WHERE group_id = $1',
+			[groupId]
+		);
+
+		res.json({
+			success: true,
+			data: {
+				...result.rows[0],
+				member_count: parseInt(memberCountResult.rows[0].count),
+			},
+		});
+	} catch (error) {
+		console.error('Update group error:', error);
+		res.status(500).json({ success: false, message: '更新群組失敗' });
+	}
+});
+
+/**
+ * DELETE /groups/:id - 刪除群組
+ */
+router.delete('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
+	try {
+		const groupId = req.params.id;
+
+		// 檢查群組是否存在
+		const existingGroup: QueryResult = await pool.query('SELECT is_super_admin FROM test_schema.groups WHERE id = $1', [
+			groupId,
+		]);
+		if (existingGroup.rows.length === 0) {
+			return res.status(404).json({ success: false, message: '群組不存在' });
+		}
+
+		// 不可刪除最高管理員群組
+		if (existingGroup.rows[0].is_super_admin === true) {
+			return res.status(403).json({ success: false, message: '不可刪除最高管理員群組' });
+		}
+
+		// 刪除群組（FOREIGN KEY 會自動將該群組的用戶 group_id 設為 NULL）
+		const result: QueryResult = await pool.query('DELETE FROM test_schema.groups WHERE id = $1 RETURNING id', [
+			groupId,
+		]);
 
 		if (result.rows.length === 0) {
 			return res.status(404).json({ success: false, message: '群組不存在' });
 		}
 
-		res.json({ success: true, data: result.rows[0] });
+		res.json({ success: true, message: '群組已刪除' });
 	} catch (error) {
-		console.error('Update group error:', error);
-		res.status(500).json({ success: false, message: '更新群組失敗' });
+		console.error('Delete group error:', error);
+		res.status(500).json({ success: false, message: '刪除群組失敗' });
 	}
 });
 
