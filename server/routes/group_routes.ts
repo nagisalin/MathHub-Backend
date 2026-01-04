@@ -1,19 +1,56 @@
 import express, { Router, Request, Response } from 'express';
 import { pool } from '../modules/db.js';
 import { QueryResult } from 'pg';
-import { validateAuthToken, TokenName } from '../modules/token.js';
+import { PERMISSION_MIDDLEWARE } from '../middleware/permissions.js';
 
 const router: Router = express.Router();
 
 // 系統所有可用權限定義
 const AVAILABLE_PERMISSIONS = [
+    // 管理相關權限
     {
         id: 'allowManagePermissions',
         name: '管理權限',
         description: '可以進入後台並編輯群組權限設定',
         category: 'admin'
     },
-    // 之後擴充其他權限時加在這裡
+    {
+        id: 'allowManageUsers',
+        name: '管理用戶',
+        description: '可以查看、編輯、停用用戶帳號',
+        category: 'admin'
+    },
+    {
+        id: 'allowManageNotices',
+        name: '管理公告',
+        description: '可以新增、編輯、刪除系統公告',
+        category: 'admin'
+    },
+    {
+        id: 'allowManageSettings',
+        name: '管理系統設定',
+        description: '可以修改系統全局設定',
+        category: 'admin'
+    },
+    // 內容管理權限
+    {
+        id: 'allowManageProblems',
+        name: '管理題目',
+        description: '可以新增、編輯、審核、修改題目狀態',
+        category: 'content'
+    },
+    {
+        id: 'allowManageComments',
+        name: '管理留言',
+        description: '可以查看、編輯、刪除用戶留言',
+        category: 'content'
+    },
+    {
+        id: 'allowManageReports',
+        name: '管理檢舉',
+        description: '可以審核、處理用戶檢舉',
+        category: 'content'
+    },
 ];
 
 /**
@@ -26,36 +63,11 @@ router.get('/permissions/available', (req: Request, res: Response) => {
     });
 });
 
-/**
- * Middleware: 驗證是否有管理權限
- */
-const requireManagePermission = async (req: Request, res: Response, next: Function) => {
-    try {
-        const authPayload = validateAuthToken(req.cookies[TokenName.AUTH]);
-        const result: QueryResult = await pool.query(
-            `SELECT g.permissions 
-             FROM test_schema.auth a 
-             JOIN test_schema.groups g ON a.group_id = g.id 
-             WHERE a.id = $1`,
-            [authPayload.username]
-        );
-        
-        const permissions = result.rows[0]?.permissions || [];
-        if (permissions.includes('allowManagePermissions')) {
-            next();
-        } else {
-            res.status(403).json({ success: false, message: '權限不足' });
-        }
-    } catch (error) {
-        console.error('Permission check error:', error);
-        res.status(401).json({ success: false, message: '未授權' });
-    }
-};
 
 /**
  * GET /groups - 取得所有群組
  */
-router.get('/', requireManagePermission, async (req: Request, res: Response) => {
+router.get('/', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
     try {
         const result: QueryResult = await pool.query(
             `SELECT 
@@ -88,7 +100,7 @@ router.get('/', requireManagePermission, async (req: Request, res: Response) => 
 /**
  * GET /groups/:id - 取得單一群組
  */
-router.get('/:id', requireManagePermission, async (req: Request, res: Response) => {
+router.get('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
     try {
         const result: QueryResult = await pool.query(
             `SELECT id, name, description, permissions, created_at, updated_at
@@ -110,7 +122,7 @@ router.get('/:id', requireManagePermission, async (req: Request, res: Response) 
 /**
  * PUT /groups/:id - 更新群組權限
  */
-router.put('/:id', requireManagePermission, async (req: Request, res: Response) => {
+router.put('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
     try {
         const { permissions, description } = req.body;
         
