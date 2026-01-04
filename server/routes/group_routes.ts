@@ -1,0 +1,120 @@
+import express, { Router, Request, Response } from 'express';
+import { pool } from '../modules/db.js';
+import { QueryResult } from 'pg';
+import { validateAuthToken, TokenName } from '../modules/token.js';
+
+const router: Router = express.Router();
+
+/**
+ * Middleware: 驗證是否有管理權限
+ */
+const requireManagePermission = async (req: Request, res: Response, next: Function) => {
+    try {
+        const authPayload = validateAuthToken(req.cookies[TokenName.AUTH]);
+        const result: QueryResult = await pool.query(
+            `SELECT g.permissions 
+             FROM test_schema.auth a 
+             JOIN test_schema.groups g ON a.group_id = g.id 
+             WHERE a.id = $1`,
+            [authPayload.username]
+        );
+        
+        const permissions = result.rows[0]?.permissions || [];
+        if (permissions.includes('allowManagePermissions')) {
+            next();
+        } else {
+            res.status(403).json({ success: false, message: '權限不足' });
+        }
+    } catch (error) {
+        console.error('Permission check error:', error);
+        res.status(401).json({ success: false, message: '未授權' });
+    }
+};
+
+/**
+ * GET /groups - 取得所有群組
+ */
+router.get('/', requireManagePermission, async (req: Request, res: Response) => {
+    try {
+        const result: QueryResult = await pool.query(
+            `SELECT 
+                g.id, 
+                g.name, 
+                g.description, 
+                g.permissions, 
+                g.created_at, 
+                g.updated_at,
+                COUNT(a.id) as member_count
+             FROM test_schema.groups g
+             LEFT JOIN test_schema.auth a ON a.group_id = g.id
+             GROUP BY g.id, g.name, g.description, g.permissions, g.created_at, g.updated_at
+             ORDER BY g.created_at ASC`
+        );
+        
+        res.json({ 
+            success: true, 
+            data: result.rows.map(row => ({
+                ...row,
+                member_count: parseInt(row.member_count)
+            }))
+        });
+    } catch (error) {
+        console.error('Get groups error:', error);
+        res.status(500).json({ success: false, message: '取得群組失敗' });
+    }
+});
+
+/**
+ * GET /groups/:id - 取得單一群組
+ */
+router.get('/:id', requireManagePermission, async (req: Request, res: Response) => {
+    try {
+        const result: QueryResult = await pool.query(
+            `SELECT id, name, description, permissions, created_at, updated_at
+             FROM test_schema.groups WHERE id = $1`,
+            [req.params.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: '群組不存在' });
+        }
+        
+        res.json({ success: true, data: result.rows[0] });
+    } catch (error) {
+        console.error('Get group error:', error);
+        res.status(500).json({ success: false, message: '取得群組失敗' });
+    }
+});
+
+/**
+ * PUT /groups/:id - 更新群組權限
+ */
+router.put('/:id', requireManagePermission, async (req: Request, res: Response) => {
+    try {
+        const { permissions, description } = req.body;
+        
+        if (!Array.isArray(permissions)) {
+            return res.status(400).json({ success: false, message: '權限格式錯誤' });
+        }
+        
+        const result: QueryResult = await pool.query(
+            `UPDATE test_schema.groups 
+             SET permissions = $1, description = $2, updated_at = NOW()
+             WHERE id = $3
+             RETURNING id, name, description, permissions, updated_at`,
+            [permissions, description, req.params.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: '群組不存在' });
+        }
+        
+        res.json({ success: true, data: result.rows[0] });
+    } catch (error) {
+        console.error('Update group error:', error);
+        res.status(500).json({ success: false, message: '更新群組失敗' });
+    }
+});
+
+export default router;
+

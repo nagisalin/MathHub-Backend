@@ -92,19 +92,34 @@ router.post(
 			const salt: string = crypto.randomBytes(16).toString('hex');
 			const hashedPassword: Buffer = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512');
 
-			// 新增用戶
-			const result: QueryResult = await pool.query(
-				`INSERT INTO test_schema.auth (
-                email, name, password, salt, 
+		// 新增用戶
+		const result: QueryResult = await pool.query(
+			`INSERT INTO test_schema.auth (
+                email, name, password, salt,
+                group_id,
                 is_email_validated, is_disabled, is_archived
              ) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) 
-             RETURNING id, email, name, permission_list, birthday, grade, is_active, 
-                       is_email_validated, is_disabled, is_archived, created_at, updated_at`,
-				[email, username, hashedPassword, salt, true, false, false]
-			);
+             VALUES ($1, $2, $3, $4, 
+                     (SELECT id FROM test_schema.groups WHERE name = '一般成員'),
+                     $5, $6, $7) 
+             RETURNING id`,
+			[email, username, hashedPassword, salt, true, false, false]
+		);
 
-			const user = result.rows[0];
+		// 取得完整用戶資料（包含 group permissions）
+		const userResult: QueryResult = await pool.query(
+			`SELECT 
+				a.id, a.email, a.name, a.birthday, a.grade, a.is_active,
+				a.is_email_validated, a.is_disabled, a.is_archived, 
+				a.created_at, a.updated_at,
+				COALESCE(g.permissions, ARRAY[]::TEXT[]) as permission_list
+			FROM test_schema.auth a
+			LEFT JOIN test_schema.groups g ON a.group_id = g.id
+			WHERE a.id = $1`,
+			[result.rows[0].id]
+		);
+
+		const user = userResult.rows[0];
 
 			// 產生 Token
 			const expiresIn: number = 3600; // 1 小時
@@ -157,13 +172,17 @@ router.post(
 				return errorResponse(res, 'invalid params');
 			}
 
-			// 查詢用戶
-			const result: QueryResult = await pool.query(
-				`SELECT id, email, name, password, salt, permission_list, birthday, grade, is_active,
-                    is_email_validated, is_disabled, is_archived, created_at, updated_at 
-             FROM test_schema.auth WHERE email = $1`,
-				[email]
-			);
+		// 查詢用戶（JOIN group 取得 permissions）
+		const result: QueryResult = await pool.query(
+			`SELECT 
+				a.id, a.email, a.name, a.password, a.salt, a.birthday, a.grade, a.is_active,
+				a.is_email_validated, a.is_disabled, a.is_archived, a.created_at, a.updated_at,
+				COALESCE(g.permissions, ARRAY[]::TEXT[]) as permission_list
+			FROM test_schema.auth a
+			LEFT JOIN test_schema.groups g ON a.group_id = g.id
+			WHERE a.email = $1`,
+			[email]
+		);
 
 			if (result.rows.length === 0) {
 				return errorResponse(res, '帳號或密碼錯誤', 401);
@@ -240,9 +259,13 @@ router.get('/me', async (req: Request, res: Response) => {
 		const authPayload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH]);
 
 		const result: QueryResult = await pool.query(
-			`SELECT id, email, name, permission_list, birthday, grade, is_active,
-                    is_email_validated, is_disabled, is_archived, created_at, updated_at 
-             FROM test_schema.auth WHERE id = $1`,
+			`SELECT 
+				a.id, a.email, a.name, a.birthday, a.grade, a.is_active,
+				a.is_email_validated, a.is_disabled, a.is_archived, a.created_at, a.updated_at,
+				COALESCE(g.permissions, ARRAY[]::TEXT[]) as permission_list
+			FROM test_schema.auth a
+			LEFT JOIN test_schema.groups g ON a.group_id = g.id
+			WHERE a.id = $1`,
 			[authPayload.username]
 		);
 
