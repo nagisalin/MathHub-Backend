@@ -25,9 +25,8 @@ function formatUserResponse(user: any) {
 		permissionList: user.permission_list || [],
 		birthday: user.birthday ? Number(user.birthday) : null,
 		grade: user.grade || null,
-		isActive: user.is_active,
-		isEmailValidated: user.is_email_validated || false,
 		isDisabled: user.is_disabled || false,
+		isEmailValidated: user.is_email_validated || false,
 		isArchived: user.is_archived || false,
 		createdAt: user.created_at ? new Date(user.created_at).getTime() : null,
 		updatedAt: user.updated_at ? new Date(user.updated_at).getTime() : null,
@@ -109,7 +108,7 @@ router.post(
 		// 取得完整用戶資料（包含 group permissions）
 		const userResult: QueryResult = await pool.query(
 			`SELECT 
-				a.id, a.email, a.name, a.birthday, a.grade, a.is_active,
+				a.id, a.email, a.name, a.birthday, a.grade, a.is_disabled,
 				a.is_email_validated, a.is_disabled, a.is_archived, 
 				a.created_at, a.updated_at,
 				COALESCE(g.permissions, ARRAY[]::TEXT[]) as permission_list
@@ -175,7 +174,7 @@ router.post(
 		// 查詢用戶（JOIN group 取得 permissions）
 		const result: QueryResult = await pool.query(
 			`SELECT 
-				a.id, a.email, a.name, a.password, a.salt, a.birthday, a.grade, a.is_active,
+				a.id, a.email, a.name, a.password, a.salt, a.birthday, a.grade, a.is_disabled,
 				a.is_email_validated, a.is_disabled, a.is_archived, a.created_at, a.updated_at,
 				COALESCE(g.permissions, ARRAY[]::TEXT[]) as permission_list
 			FROM test_schema.auth a
@@ -190,8 +189,8 @@ router.post(
 
 			const user = result.rows[0];
 
-			// 檢查帳號是否啟用
-			if (!user.is_active) {
+			// 檢查帳號是否停用
+			if (user.is_disabled) {
 				return errorResponse(res, '此帳號已被停用', 403);
 			}
 
@@ -260,7 +259,7 @@ router.get('/me', async (req: Request, res: Response) => {
 
 		const result: QueryResult = await pool.query(
 			`SELECT 
-				a.id, a.email, a.name, a.birthday, a.grade, a.is_active,
+				a.id, a.email, a.name, a.birthday, a.grade, a.is_disabled,
 				a.is_email_validated, a.is_disabled, a.is_archived, a.created_at, a.updated_at,
 				COALESCE(g.permissions, ARRAY[]::TEXT[]) as permission_list
 			FROM test_schema.auth a

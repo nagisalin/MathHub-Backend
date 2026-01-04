@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser'
 import questRoutes from './routes/quest_routes.js'
 import authRoutes from './routes/auth_routes.js'
 import groupRoutes from './routes/group_routes.js'
+import userRoutes from './routes/user_routes.js'
 
 dotenv.config()
 
@@ -27,6 +28,7 @@ app.use(cookieParser())
 // 模組化路由函式
 app.use('/quest', questRoutes)
 app.use('/auth', authRoutes)
+app.use('/auth/users', userRoutes) // 帳號管理 API
 app.use('/groups', groupRoutes)
 
 app.get("/", (req: Request, res: Response) => {
