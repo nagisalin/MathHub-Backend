@@ -93,7 +93,7 @@ router.get('/', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, re
                 COUNT(a.id) as member_count
              FROM test_schema.groups g
              LEFT JOIN test_schema.auth a ON a.group_id = g.id
-             WHERE g.is_super_admin = false
+             WHERE g.is_super_admin = false AND g.is_default_group = false
              GROUP BY g.id, g.name, g.description, g.permissions, g.created_at, g.updated_at
              ORDER BY g.created_at ASC`
 		);
@@ -186,14 +186,16 @@ router.put('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request,
 		const { name, description, permissions } = req.body;
 
 		// 檢查群組是否存在
-		const existingGroup: QueryResult = await pool.query('SELECT is_super_admin FROM test_schema.groups WHERE id = $1', [
-			groupId,
-		]);
+		const existingGroup: QueryResult = await pool.query(
+			'SELECT is_super_admin, is_default_group FROM test_schema.groups WHERE id = $1',
+			[groupId]
+		);
 		if (existingGroup.rows.length === 0) {
 			return res.status(404).json({ success: false, message: '群組不存在' });
 		}
 
 		const isSuperAdminGroup = existingGroup.rows[0].is_super_admin === true;
+		const isDefaultGroup = existingGroup.rows[0].is_default_group === true;
 
 		// 如果更新的是最高管理員群組，必須保留 allowManagePermissions 權限
 		if (isSuperAdminGroup && Array.isArray(permissions)) {
@@ -201,6 +203,16 @@ router.put('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request,
 				return res.status(400).json({
 					success: false,
 					message: '最高管理員群組必須保留管理權限',
+				});
+			}
+		}
+
+		// 如果更新的是預設群組（一般成員），強制權限為空陣列
+		if (isDefaultGroup && Array.isArray(permissions)) {
+			if (permissions.length > 0) {
+				return res.status(400).json({
+					success: false,
+					message: '一般成員群組不能擁有任何權限',
 				});
 			}
 		}
@@ -232,8 +244,10 @@ router.put('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request,
 		}
 
 		if (Array.isArray(permissions)) {
+			// 如果是預設群組，強制設為空陣列
+			const finalPermissions = isDefaultGroup ? [] : permissions;
 			updates.push(`permissions = $${paramIndex}`);
-			params.push(permissions);
+			params.push(finalPermissions);
 			paramIndex++;
 		}
 
@@ -280,9 +294,10 @@ router.delete('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Reque
 		const groupId = req.params.id;
 
 		// 檢查群組是否存在
-		const existingGroup: QueryResult = await pool.query('SELECT is_super_admin FROM test_schema.groups WHERE id = $1', [
-			groupId,
-		]);
+		const existingGroup: QueryResult = await pool.query(
+			'SELECT is_super_admin, is_default_group FROM test_schema.groups WHERE id = $1',
+			[groupId]
+		);
 		if (existingGroup.rows.length === 0) {
 			return res.status(404).json({ success: false, message: '群組不存在' });
 		}
@@ -290,6 +305,11 @@ router.delete('/:id', PERMISSION_MIDDLEWARE.managePermissions, async (req: Reque
 		// 不可刪除最高管理員群組
 		if (existingGroup.rows[0].is_super_admin === true) {
 			return res.status(403).json({ success: false, message: '不可刪除最高管理員群組' });
+		}
+
+		// 不可刪除預設群組（一般成員）
+		if (existingGroup.rows[0].is_default_group === true) {
+			return res.status(403).json({ success: false, message: '不可刪除一般成員群組' });
 		}
 
 		// 刪除群組（FOREIGN KEY 會自動將該群組的用戶 group_id 設為 NULL）

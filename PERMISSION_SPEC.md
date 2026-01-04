@@ -146,6 +146,7 @@ CREATE TABLE test_schema.groups (
   description TEXT,
   permissions TEXT[] NOT NULL DEFAULT '{}',
   is_super_admin BOOLEAN DEFAULT false,
+  is_default_group BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -153,6 +154,7 @@ CREATE TABLE test_schema.groups (
 
 **欄位說明：**
 - `is_super_admin`: 標記是否為最高管理員群組，只有一個群組可以是 `true`（透過唯一索引保證）
+- `is_default_group`: 標記是否為預設群組（一般成員），只有一個群組可以是 `true`（透過唯一索引保證），該群組權限永遠為空陣列
 
 **欄位說明：**
 - `permissions`: TEXT[] 陣列，儲存權限 ID 列表，例如：`['allowManageUsers', 'allowManageComments']`
@@ -407,12 +409,13 @@ Middleware 驗證 Cookie (auth_token)
 
 **保護規則：**
 1. **不顯示在列表**：`GET /auth/users` 自動過濾 `is_super_admin = true` 群組的帳號
-2. **不可編輯**：`PATCH /auth/users/:id` 檢查並拒絕編輯最高管理員
-3. **不可停用**：`PATCH /auth/users/:id/status` 檢查並拒絕停用最高管理員
-4. **不可刪除**：`DELETE /auth/users/:id` 檢查並拒絕刪除最高管理員
-5. **不可刪除群組**：`DELETE /groups/:id` 檢查並拒絕刪除 `is_super_admin = true` 的群組
-6. **必須保留權限**：更新最高管理員群組時，必須保留 `allowManagePermissions` 權限
-7. **默認所有權限**：最高管理員群組應包含所有權限（後端邏輯層面）
+2. **不顯示在群組列表**：`GET /groups` 自動過濾 `is_super_admin = true` 的群組
+3. **不可編輯**：`PATCH /auth/users/:id` 檢查並拒絕編輯最高管理員
+4. **不可停用**：`PATCH /auth/users/:id/status` 檢查並拒絕停用最高管理員
+5. **不可刪除**：`DELETE /auth/users/:id` 檢查並拒絕刪除最高管理員
+6. **不可刪除群組**：`DELETE /groups/:id` 檢查並拒絕刪除 `is_super_admin = true` 的群組
+7. **必須保留權限**：更新最高管理員群組時，必須保留 `allowManagePermissions` 權限
+8. **默認所有權限**：最高管理員群組應包含所有權限（後端邏輯層面）
 
 **實作方式：**
 ```typescript
@@ -437,6 +440,21 @@ async function isSuperAdminGroup(groupId: string): Promise<boolean> {
   return result.rows[0]?.is_super_admin === true;
 }
 ```
+
+### 預設群組（一般成員）保護機制
+
+**識別方式：**
+- 使用 `groups.is_default_group` 欄位標記（`BOOLEAN`）
+- 只有一個群組可以是 `is_default_group = true`（透過唯一索引保證）
+- 該群組為新註冊帳號的預設群組
+- 與最高管理員完全相反：無任何權限，永遠為最低層級
+
+**保護規則：**
+1. **不顯示在群組列表**：`GET /groups` 自動過濾 `is_default_group = true` 的群組
+2. **不可刪除群組**：`DELETE /groups/:id` 檢查並拒絕刪除 `is_default_group = true` 的群組
+3. **權限永遠為空**：更新預設群組時，強制 `permissions` 為空陣列，拒絕任何權限設定
+4. **預設分配**：新註冊帳號自動分配到此群組（`POST /auth/register`）
+5. **手動建立帳號預設**：管理員手動建立帳號時，如果未指定 `group_id`，預設分配到此群組（`POST /auth/users`）
 
 ### 帳號狀態管理
 

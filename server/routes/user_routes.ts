@@ -248,7 +248,7 @@ router.post('/', PERMISSION_MIDDLEWARE.manageUsers, async (
 		let finalGroupId = group_id;
 		if (!finalGroupId) {
 			const defaultGroupResult: QueryResult = await pool.query(
-				"SELECT id FROM test_schema.groups WHERE name = '一般成員'"
+				'SELECT id FROM test_schema.groups WHERE is_default_group = true'
 			);
 			if (defaultGroupResult.rows.length > 0) {
 				finalGroupId = defaultGroupResult.rows[0].id;

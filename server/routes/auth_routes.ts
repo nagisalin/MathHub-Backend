@@ -99,7 +99,7 @@ router.post(
                 is_email_validated, is_disabled, is_archived
              ) 
              VALUES ($1, $2, $3, $4, 
-                     (SELECT id FROM test_schema.groups WHERE name = '一般成員'),
+                     (SELECT id FROM test_schema.groups WHERE is_default_group = true),
                      $5, $6, $7) 
              RETURNING id`,
 			[email, username, hashedPassword, salt, true, false, false]
