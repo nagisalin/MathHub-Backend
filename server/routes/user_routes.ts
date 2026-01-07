@@ -7,9 +7,9 @@ import { PERMISSION_MIDDLEWARE } from '../middleware/permissions.js';
 
 const router: Router = express.Router();
 
-// 密碼格式驗證：至少8位，最長64位，至少一個大寫字母和一個特殊字元
+// 密碼格式驗證：至少8位，最長64位，至少包含一個大寫字母、一個小寫字母和一個特殊字元
 const PASSWORD_FORMAT: RegExp =
-	/^(?=.*[A-Z])(?=.*[!"#$%&'()*+,-./:;<=>?@^_`{|}~])[a-zA-Z0-9!"#$%&'()*+,-./:;<=>?@^_`{|}~]{8,64}$/;
+	/^(?=.*[A-Z])(?=.*[a-z])(?=.*[!"#$%&'()*+,-./:;<=>?@^_`{|}~])[a-zA-Z0-9!"#$%&'()*+,-./:;<=>?@^_`{|}~]{8,64}$/;
 
 // 電子郵件格式驗證
 const EMAIL_FORMAT: RegExp = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -107,8 +107,9 @@ router.get('/', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, res: Res
 		const params: any[] = [];
 		let paramIndex = 1;
 
-		// 過濾最高管理員群組
+		// 過濾最高管理員群組和一般成員群組
 		conditions.push(`(g.is_super_admin = false OR g.is_super_admin IS NULL)`);
+		conditions.push(`(g.is_default_group = false OR g.is_default_group IS NULL)`);
 
 		// 搜尋條件
 		if (search) {
@@ -214,6 +215,10 @@ router.post('/', PERMISSION_MIDDLEWARE.manageUsers, async (
 	res: Response
 ) => {
 	try {
+		// 取得當前建立者 ID
+		const authPayload = validateAuthToken(req.cookies[TokenName.AUTH]);
+		const creatorId = authPayload.username; // username 實際上是 user.id
+
 		const { email, name, password, group_id, birthday, grade, is_email_validated } = req.body;
 
 		// 驗證必填欄位
@@ -228,7 +233,7 @@ router.post('/', PERMISSION_MIDDLEWARE.manageUsers, async (
 
 		// 驗證密碼格式
 		if (!PASSWORD_FORMAT.test(password)) {
-			return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母和一個特殊字元');
+			return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母、一個小寫字母和一個特殊字元');
 		}
 
 		// 檢查電子郵件是否已存在（包括 archived 帳號）
@@ -259,8 +264,8 @@ router.post('/', PERMISSION_MIDDLEWARE.manageUsers, async (
 		const result: QueryResult = await pool.query(
 			`INSERT INTO test_schema.auth (
 				email, name, password, salt, group_id,
-				birthday, grade, is_email_validated, is_disabled, is_archived
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				birthday, grade, is_email_validated, is_disabled, is_archived, creator
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			RETURNING id, email, name, group_id, birthday, grade,
 				is_email_validated, is_disabled, is_archived, created_at, updated_at`,
 			[
@@ -274,6 +279,7 @@ router.post('/', PERMISSION_MIDDLEWARE.manageUsers, async (
 				is_email_validated ?? true,
 				false, // is_disabled 預設 false
 				false, // is_archived 預設 false
+				creatorId, // creator 為建立者 ID
 			]
 		);
 

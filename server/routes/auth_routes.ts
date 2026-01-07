@@ -7,9 +7,9 @@ import { HttpError, HttpStatusCode } from '../modules/http_status_code.js';
 
 const router: Router = express.Router();
 
-// 密碼格式驗證：至少8位，最長64位，至少一個大寫字母和一個特殊字元
+// 密碼格式驗證：至少8位，最長64位，至少包含一個大寫字母、一個小寫字母和一個特殊字元
 const PASSWORD_FORMAT: RegExp =
-	/^(?=.*[A-Z])(?=.*[!"#$%&'()*+,-./:;<=>?@^_`{|}~])[a-zA-Z0-9!"#$%&'()*+,-./:;<=>?@^_`{|}~]{8,64}$/;
+	/^(?=.*[A-Z])(?=.*[a-z])(?=.*[!"#$%&'()*+,-./:;<=>?@^_`{|}~])[a-zA-Z0-9!"#$%&'()*+,-./:;<=>?@^_`{|}~]{8,64}$/;
 
 // 電子郵件格式驗證
 const EMAIL_FORMAT: RegExp = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -76,7 +76,7 @@ router.post(
 
 			// 驗證密碼格式
 			if (!PASSWORD_FORMAT.test(password)) {
-				return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母和一個特殊字元');
+				return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母、一個小寫字母和一個特殊字元');
 			}
 
 			// 檢查電子郵件是否已存在
@@ -96,13 +96,13 @@ router.post(
 			`INSERT INTO test_schema.auth (
                 email, name, password, salt,
                 group_id,
-                is_email_validated, is_disabled, is_archived
+                is_email_validated, is_disabled, is_archived, creator
              ) 
              VALUES ($1, $2, $3, $4, 
                      (SELECT id FROM test_schema.groups WHERE is_default_group = true),
-                     $5, $6, $7) 
+                     $5, $6, $7, $8) 
              RETURNING id`,
-			[email, username, hashedPassword, salt, true, false, false]
+			[email, username, hashedPassword, salt, true, false, false, null] // creator 為 null（自己註冊）
 		);
 
 		// 取得完整用戶資料（包含 group permissions）
