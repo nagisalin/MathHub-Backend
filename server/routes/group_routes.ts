@@ -79,23 +79,36 @@ router.get('/permissions/available', PERMISSION_MIDDLEWARE.managePermissions, (r
 
 /**
  * GET /groups - 取得所有群組（排除最高管理員群組）
+ * Query Parameters:
+ *   - includeDefault: boolean (可選) - 是否包含預設群組（一般成員），預設為 false
  */
 router.get('/', PERMISSION_MIDDLEWARE.managePermissions, async (req: Request, res: Response) => {
 	try {
+		const includeDefault = req.query.includeDefault === 'true';
+		
+		// 建立 WHERE 條件
+		const conditions = ['g.is_super_admin = false'];
+		if (!includeDefault) {
+			conditions.push('g.is_default_group = false');
+		}
+		
+		const whereClause = conditions.join(' AND ');
+		
 		const result: QueryResult = await pool.query(
 			`SELECT 
                 g.id, 
                 g.name, 
                 g.description, 
                 g.permissions, 
+                g.is_default_group,
                 g.created_at, 
                 g.updated_at,
                 COUNT(a.id) as member_count
              FROM test_schema.groups g
              LEFT JOIN test_schema.auth a ON a.group_id = g.id
-             WHERE g.is_super_admin = false AND g.is_default_group = false
-             GROUP BY g.id, g.name, g.description, g.permissions, g.created_at, g.updated_at
-             ORDER BY g.created_at ASC`
+             WHERE ${whereClause}
+             GROUP BY g.id, g.name, g.description, g.permissions, g.is_default_group, g.created_at, g.updated_at
+             ORDER BY g.is_default_group DESC, g.created_at ASC`
 		);
 
 		res.json({

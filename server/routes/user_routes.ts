@@ -38,10 +38,9 @@ async function isSuperAdmin(userId: string): Promise<boolean> {
  */
 async function isSuperAdminGroup(groupId: string): Promise<boolean> {
 	try {
-		const result: QueryResult = await pool.query(
-			`SELECT is_super_admin FROM test_schema.groups WHERE id = $1`,
-			[groupId]
-		);
+		const result: QueryResult = await pool.query(`SELECT is_super_admin FROM test_schema.groups WHERE id = $1`, [
+			groupId,
+		]);
 		return result.rows[0]?.is_super_admin === true;
 	} catch (error) {
 		console.error('Check super admin group error:', error);
@@ -107,9 +106,8 @@ router.get('/', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, res: Res
 		const params: any[] = [];
 		let paramIndex = 1;
 
-		// 過濾最高管理員群組和一般成員群組
+		// 過濾最高管理員群組（一般成員群組的帳號應該要顯示）
 		conditions.push(`(g.is_super_admin = false OR g.is_super_admin IS NULL)`);
-		conditions.push(`(g.is_default_group = false OR g.is_default_group IS NULL)`);
 
 		// 搜尋條件
 		if (search) {
@@ -202,264 +200,280 @@ router.get('/:id', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, res: 
 /**
  * POST /auth/users - 建立新帳號
  */
-router.post('/', PERMISSION_MIDDLEWARE.manageUsers, async (
-	req: Request<{}, {}, {
-		email: string;
-		name: string;
-		password: string;
-		group_id?: string;
-		birthday?: number;
-		grade?: string;
-		is_email_validated?: boolean;
-	}>,
-	res: Response
-) => {
-	try {
-		// 取得當前建立者 ID
-		const authPayload = validateAuthToken(req.cookies[TokenName.AUTH]);
-		const creatorId = authPayload.username; // username 實際上是 user.id
-
-		const { email, name, password, group_id, birthday, grade, is_email_validated } = req.body;
-
-		// 驗證必填欄位
-		if (!email || !name || !password) {
-			return errorResponse(res, '缺少必填欄位：email, name, password');
-		}
-
-		// 驗證電子郵件格式
-		if (!EMAIL_FORMAT.test(email)) {
-			return errorResponse(res, '電子郵件格式不正確');
-		}
-
-		// 驗證密碼格式
-		if (!PASSWORD_FORMAT.test(password)) {
-			return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母、一個小寫字母和一個特殊字元');
-		}
-
-		// 檢查電子郵件是否已存在（包括 archived 帳號）
-		const existingUser: QueryResult = await pool.query(
-			'SELECT id FROM test_schema.auth WHERE email = $1',
-			[email]
-		);
-		if (existingUser.rows.length > 0) {
-			return errorResponse(res, '此電子郵件已被使用');
-		}
-
-		// 密碼加密
-		const salt: string = crypto.randomBytes(16).toString('hex');
-		const hashedPassword: Buffer = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512');
-
-		// 取得預設群組（如果未指定）
-		let finalGroupId = group_id;
-		if (!finalGroupId) {
-			const defaultGroupResult: QueryResult = await pool.query(
-				'SELECT id FROM test_schema.groups WHERE is_default_group = true'
-			);
-			if (defaultGroupResult.rows.length > 0) {
-				finalGroupId = defaultGroupResult.rows[0].id;
+router.post(
+	'/',
+	PERMISSION_MIDDLEWARE.manageUsers,
+	async (
+		req: Request<
+			{},
+			{},
+			{
+				email: string;
+				name: string;
+				password: string;
+				group_id?: string;
+				birthday?: number;
+				grade?: string;
+				is_email_validated?: boolean;
 			}
-		}
+		>,
+		res: Response
+	) => {
+		try {
+			// 取得當前建立者 ID
+			const authPayload = validateAuthToken(req.cookies[TokenName.AUTH]);
+			const creatorId = authPayload.username; // username 實際上是 user.id
 
-		// 建立帳號
-		const result: QueryResult = await pool.query(
-			`INSERT INTO test_schema.auth (
-				email, name, password, salt, group_id,
-				birthday, grade, is_email_validated, is_disabled, is_archived, creator
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			RETURNING id, email, name, group_id, birthday, grade,
-				is_email_validated, is_disabled, is_archived, created_at, updated_at`,
-			[
-				email,
-				name,
-				hashedPassword,
-				salt,
-				finalGroupId,
-				birthday ? new Date(birthday) : null,
-				grade || null,
-				is_email_validated ?? true,
-				false, // is_disabled 預設 false
-				false, // is_archived 預設 false
-				creatorId, // creator 為建立者 ID
-			]
-		);
+			const { email, name, password, group_id, birthday, grade, is_email_validated } = req.body;
 
-		// 取得群組名稱
-		const groupResult: QueryResult = await pool.query(
-			'SELECT name FROM test_schema.groups WHERE id = $1',
-			[finalGroupId]
-		);
-
-		const user = result.rows[0];
-		successResponse(res, {
-			...formatUserResponse(user),
-			group_name: groupResult.rows[0]?.name || null,
-		}, 201);
-	} catch (error) {
-		console.error('Create user error:', error);
-		errorResponse(res, '建立帳號失敗', 500);
-	}
-});
-
-/**
- * PATCH /auth/users/:id - 更新帳號
- */
-router.patch('/:id', PERMISSION_MIDDLEWARE.manageUsers, async (
-	req: Request<{ id: string }, {}, {
-		name?: string;
-		email?: string;
-		group_id?: string;
-		birthday?: number;
-		grade?: string;
-		is_email_validated?: boolean;
-	}>,
-	res: Response
-) => {
-	try {
-		const userId = req.params.id;
-		const { name, email, group_id, birthday, grade, is_email_validated } = req.body;
-
-		// 檢查是否為最高管理員
-		if (await isSuperAdmin(userId)) {
-			return errorResponse(res, '不可編輯最高管理員', 403);
-		}
-
-		// 檢查帳號是否存在
-		const existingUser: QueryResult = await pool.query(
-			'SELECT id, email FROM test_schema.auth WHERE id = $1 AND is_archived = false',
-			[userId]
-		);
-		if (existingUser.rows.length === 0) {
-			return errorResponse(res, '帳號不存在', 404);
-		}
-
-		// 如果更新 email，檢查是否重複
-		if (email && email !== existingUser.rows[0].email) {
-			const emailCheck: QueryResult = await pool.query(
-				'SELECT id FROM test_schema.auth WHERE email = $1 AND id != $2',
-				[email, userId]
-			);
-			if (emailCheck.rows.length > 0) {
-				return errorResponse(res, '此電子郵件已被使用');
+			// 驗證必填欄位
+			if (!email || !name || !password) {
+				return errorResponse(res, '缺少必填欄位：email, name, password');
 			}
 
 			// 驗證電子郵件格式
 			if (!EMAIL_FORMAT.test(email)) {
 				return errorResponse(res, '電子郵件格式不正確');
 			}
-		}
 
-		// 建立更新欄位
-		const updates: string[] = [];
-		const params: any[] = [];
-		let paramIndex = 1;
+			// 驗證密碼格式
+			if (!PASSWORD_FORMAT.test(password)) {
+				return errorResponse(res, '密碼格式不正確，需要8-64位，至少包含一個大寫字母、一個小寫字母和一個特殊字元');
+			}
 
-		if (name !== undefined) {
-			updates.push(`name = $${paramIndex}`);
-			params.push(name);
-			paramIndex++;
-		}
-		if (email !== undefined) {
-			updates.push(`email = $${paramIndex}`);
-			params.push(email);
-			paramIndex++;
-		}
-		if (group_id !== undefined) {
-			updates.push(`group_id = $${paramIndex}`);
-			params.push(group_id);
-			paramIndex++;
-		}
-		if (birthday !== undefined) {
-			updates.push(`birthday = $${paramIndex}`);
-			params.push(birthday ? new Date(birthday) : null);
-			paramIndex++;
-		}
-		if (grade !== undefined) {
-			updates.push(`grade = $${paramIndex}`);
-			params.push(grade || null);
-			paramIndex++;
-		}
-		if (is_email_validated !== undefined) {
-			updates.push(`is_email_validated = $${paramIndex}`);
-			params.push(is_email_validated);
-			paramIndex++;
-		}
+			// 檢查電子郵件是否已存在（包括 archived 帳號）
+			const existingUser: QueryResult = await pool.query('SELECT id FROM test_schema.auth WHERE email = $1', [email]);
+			if (existingUser.rows.length > 0) {
+				return errorResponse(res, '此電子郵件已被使用');
+			}
 
-		if (updates.length === 0) {
-			return errorResponse(res, '沒有要更新的欄位');
+			// 密碼加密
+			const salt: string = crypto.randomBytes(16).toString('hex');
+			const hashedPassword: Buffer = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512');
+
+			// 取得預設群組（如果未指定）
+			let finalGroupId = group_id;
+			if (!finalGroupId) {
+				const defaultGroupResult: QueryResult = await pool.query(
+					'SELECT id FROM test_schema.groups WHERE is_default_group = true'
+				);
+				if (defaultGroupResult.rows.length > 0) {
+					finalGroupId = defaultGroupResult.rows[0].id;
+				}
+			}
+
+			// 建立帳號
+			const result: QueryResult = await pool.query(
+				`INSERT INTO test_schema.auth (
+				email, name, password, salt, group_id,
+				birthday, grade, is_email_validated, is_disabled, is_archived, creator
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			RETURNING id, email, name, group_id, birthday, grade,
+				is_email_validated, is_disabled, is_archived, created_at, updated_at`,
+				[
+					email,
+					name,
+					hashedPassword,
+					salt,
+					finalGroupId,
+					birthday ? new Date(birthday) : null,
+					grade || null,
+					is_email_validated ?? true,
+					false, // is_disabled 預設 false
+					false, // is_archived 預設 false
+					creatorId, // creator 為建立者 ID
+				]
+			);
+
+			// 取得群組名稱
+			const groupResult: QueryResult = await pool.query('SELECT name FROM test_schema.groups WHERE id = $1', [
+				finalGroupId,
+			]);
+
+			const user = result.rows[0];
+			successResponse(
+				res,
+				{
+					...formatUserResponse(user),
+					group_name: groupResult.rows[0]?.name || null,
+				},
+				201
+			);
+		} catch (error) {
+			console.error('Create user error:', error);
+			errorResponse(res, '建立帳號失敗', 500);
 		}
+	}
+);
 
-		updates.push(`updated_at = NOW()`);
-		params.push(userId);
+/**
+ * PATCH /auth/users/:id - 更新帳號
+ */
+router.patch(
+	'/:id',
+	PERMISSION_MIDDLEWARE.manageUsers,
+	async (
+		req: Request<
+			{ id: string },
+			{},
+			{
+				name?: string;
+				email?: string;
+				group_id?: string;
+				birthday?: number;
+				grade?: string;
+				is_email_validated?: boolean;
+			}
+		>,
+		res: Response
+	) => {
+		try {
+			const userId = req.params.id;
+			const { name, email, group_id, birthday, grade, is_email_validated } = req.body;
 
-		// 更新帳號
-		const result: QueryResult = await pool.query(
-			`UPDATE test_schema.auth 
+			// 檢查是否為最高管理員
+			if (await isSuperAdmin(userId)) {
+				return errorResponse(res, '不可編輯最高管理員', 403);
+			}
+
+			// 檢查帳號是否存在
+			const existingUser: QueryResult = await pool.query(
+				'SELECT id, email FROM test_schema.auth WHERE id = $1 AND is_archived = false',
+				[userId]
+			);
+			if (existingUser.rows.length === 0) {
+				return errorResponse(res, '帳號不存在', 404);
+			}
+
+			// 如果更新 email，檢查是否重複
+			if (email && email !== existingUser.rows[0].email) {
+				const emailCheck: QueryResult = await pool.query(
+					'SELECT id FROM test_schema.auth WHERE email = $1 AND id != $2',
+					[email, userId]
+				);
+				if (emailCheck.rows.length > 0) {
+					return errorResponse(res, '此電子郵件已被使用');
+				}
+
+				// 驗證電子郵件格式
+				if (!EMAIL_FORMAT.test(email)) {
+					return errorResponse(res, '電子郵件格式不正確');
+				}
+			}
+
+			// 建立更新欄位
+			const updates: string[] = [];
+			const params: any[] = [];
+			let paramIndex = 1;
+
+			if (name !== undefined) {
+				updates.push(`name = $${paramIndex}`);
+				params.push(name);
+				paramIndex++;
+			}
+			if (email !== undefined) {
+				updates.push(`email = $${paramIndex}`);
+				params.push(email);
+				paramIndex++;
+			}
+			if (group_id !== undefined) {
+				updates.push(`group_id = $${paramIndex}`);
+				params.push(group_id);
+				paramIndex++;
+			}
+			if (birthday !== undefined) {
+				updates.push(`birthday = $${paramIndex}`);
+				params.push(birthday ? new Date(birthday) : null);
+				paramIndex++;
+			}
+			if (grade !== undefined) {
+				updates.push(`grade = $${paramIndex}`);
+				params.push(grade || null);
+				paramIndex++;
+			}
+			if (is_email_validated !== undefined) {
+				updates.push(`is_email_validated = $${paramIndex}`);
+				params.push(is_email_validated);
+				paramIndex++;
+			}
+
+			if (updates.length === 0) {
+				return errorResponse(res, '沒有要更新的欄位');
+			}
+
+			updates.push(`updated_at = NOW()`);
+			params.push(userId);
+
+			// 更新帳號
+			const result: QueryResult = await pool.query(
+				`UPDATE test_schema.auth 
 			 SET ${updates.join(', ')}
 			 WHERE id = $${paramIndex}
 			 RETURNING id, email, name, group_id, birthday, grade,
 				is_email_validated, is_disabled, is_archived, created_at, updated_at`,
-			params
-		);
+				params
+			);
 
-		// 取得群組名稱
-		const groupResult: QueryResult = await pool.query(
-			'SELECT name FROM test_schema.groups WHERE id = $1',
-			[result.rows[0].group_id]
-		);
+			// 取得群組名稱
+			const groupResult: QueryResult = await pool.query('SELECT name FROM test_schema.groups WHERE id = $1', [
+				result.rows[0].group_id,
+			]);
 
-		successResponse(res, {
-			...formatUserResponse(result.rows[0]),
-			group_name: groupResult.rows[0]?.name || null,
-		});
-	} catch (error) {
-		console.error('Update user error:', error);
-		errorResponse(res, '更新帳號失敗', 500);
+			successResponse(res, {
+				...formatUserResponse(result.rows[0]),
+				group_name: groupResult.rows[0]?.name || null,
+			});
+		} catch (error) {
+			console.error('Update user error:', error);
+			errorResponse(res, '更新帳號失敗', 500);
+		}
 	}
-});
+);
 
 /**
  * PATCH /auth/users/:id/status - 停用/啟用帳號
  */
-router.patch('/:id/status', PERMISSION_MIDDLEWARE.manageUsers, async (
-	req: Request<{ id: string }, {}, { is_disabled: boolean }>,
-	res: Response
-) => {
-	try {
-		const userId = req.params.id;
-		const { is_disabled } = req.body;
+router.patch(
+	'/:id/status',
+	PERMISSION_MIDDLEWARE.manageUsers,
+	async (req: Request<{ id: string }, {}, { is_disabled: boolean }>, res: Response) => {
+		try {
+			const userId = req.params.id;
+			const { is_disabled } = req.body;
 
-		if (typeof is_disabled !== 'boolean') {
-			return errorResponse(res, 'is_disabled 必須為 boolean');
-		}
+			if (typeof is_disabled !== 'boolean') {
+				return errorResponse(res, 'is_disabled 必須為 boolean');
+			}
 
-		// 檢查是否為最高管理員
-		if (await isSuperAdmin(userId)) {
-			return errorResponse(res, '不可停用最高管理員', 403);
-		}
+			// 檢查是否為最高管理員
+			if (await isSuperAdmin(userId)) {
+				return errorResponse(res, '不可停用最高管理員', 403);
+			}
 
-		// 更新狀態
-		const result: QueryResult = await pool.query(
-			`UPDATE test_schema.auth 
+			// 更新狀態
+			const result: QueryResult = await pool.query(
+				`UPDATE test_schema.auth 
 			 SET is_disabled = $1, updated_at = NOW()
 			 WHERE id = $2 AND is_archived = false
 			 RETURNING id, is_disabled`,
-			[is_disabled, userId]
-		);
+				[is_disabled, userId]
+			);
 
-		if (result.rows.length === 0) {
-			return errorResponse(res, '帳號不存在', 404);
+			if (result.rows.length === 0) {
+				return errorResponse(res, '帳號不存在', 404);
+			}
+
+			successResponse(res, {
+				id: result.rows[0].id,
+				is_disabled: result.rows[0].is_disabled,
+				message: is_disabled ? '帳號已停用' : '帳號已啟用',
+			});
+		} catch (error) {
+			console.error('Update user status error:', error);
+			errorResponse(res, '更新帳號狀態失敗', 500);
 		}
-
-		successResponse(res, {
-			id: result.rows[0].id,
-			is_disabled: result.rows[0].is_disabled,
-			message: is_disabled ? '帳號已停用' : '帳號已啟用',
-		});
-	} catch (error) {
-		console.error('Update user status error:', error);
-		errorResponse(res, '更新帳號狀態失敗', 500);
 	}
-});
+);
 
 /**
  * DELETE /auth/users/:id - 刪除帳號（Archive）
@@ -494,4 +508,3 @@ router.delete('/:id', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, re
 });
 
 export default router;
-
