@@ -6,29 +6,24 @@ import { PERMISSION_MIDDLEWARE } from '../middleware/permissions.js';
 
 const router: Router = express.Router();
 
-// 草稿標記時間（2286-01-01）
-const DRAFT_TIMESTAMP = new Date('2286-01-01').getTime();
-
 /**
  * 正規化 scheduleAt
- * -1 = 草稿（轉為 2286-01-01）
+ * -1 = 草稿（轉為 NULL）
  * 0 = 立即發布（轉為 NOW()）
- * > 0 = 排程發布（直接使用）
+ * > 0 = 排程發布（直接使用時間戳）
  */
-function normalizeScheduleAt(scheduleAt: number): Date {
-	const now = new Date();
-
+function normalizeScheduleAt(scheduleAt: number): Date | null {
 	if (scheduleAt === -1) {
-		// 草稿：設為很遠的未來
-		return new Date('2286-01-01');
+		// 草稿：使用 NULL
+		return null;
 	}
 
-	if (scheduleAt === 0 || scheduleAt <= now.getTime()) {
-		// 立即發布
-		return now;
+	if (scheduleAt === 0) {
+		// 立即發布：存當前時間（NOW()）
+		return new Date();
 	}
 
-	// 排程發布
+	// 排程發布：直接使用時間戳
 	return new Date(scheduleAt);
 }
 
@@ -48,11 +43,16 @@ async function getMaxPinOrder(): Promise<number> {
  * 格式化公告回應
  */
 function formatNoticeResponse(notice: any) {
+	// 如果 schedule_at 是 NULL，返回 -1（草稿）
+	// 如果 schedule_at 是 0，返回 0（立即發布）
+	// 否則返回 timestamp（排程發布）
+	const scheduleAt = notice.schedule_at === null ? -1 : new Date(notice.schedule_at).getTime();
+
 	return {
 		id: notice.id,
 		title: notice.title,
 		content: notice.content,
-		scheduleAt: notice.schedule_at ? new Date(notice.schedule_at).getTime() : null,
+		scheduleAt,
 		pin: notice.pin || false,
 		pinOrder: notice.pin_order || null,
 		category: notice.category || null,
@@ -97,7 +97,9 @@ router.get('/', PERMISSION_MIDDLEWARE.manageNotices, async (req: Request, res: R
 		const startDate = req.query.startDate as string; // ISO date string
 		const endDate = req.query.endDate as string; // ISO date string
 
-		const offset = (page - 1) * limit;
+		// page=0 && limit=0 表示取得所有資料（不分頁）
+		const isGetAll = page === 0 && limit === 0;
+		const offset = isGetAll ? 0 : (page - 1) * limit;
 		const now = new Date();
 
 		// 建立 WHERE 條件
@@ -115,22 +117,18 @@ router.get('/', PERMISSION_MIDDLEWARE.manageNotices, async (req: Request, res: R
 		// 狀態篩選
 		if (status) {
 			if (status === 'draft') {
-				// 草稿：schedule_at = 2286-01-01
-				conditions.push(`schedule_at = $${paramIndex}`);
-				params.push(new Date('2286-01-01'));
-				paramIndex++;
+				// 草稿：schedule_at IS NULL
+				conditions.push(`schedule_at IS NULL`);
 			} else if (status === 'published') {
-				// 已發布：schedule_at != 2286-01-01 AND schedule_at <= NOW()
-				conditions.push(`schedule_at != $${paramIndex} AND schedule_at <= $${paramIndex + 1}`);
-				params.push(new Date('2286-01-01'));
+				// 已發布：schedule_at IS NOT NULL AND schedule_at <= NOW()
+				conditions.push(`schedule_at IS NOT NULL AND schedule_at <= $${paramIndex}`);
 				params.push(now);
-				paramIndex += 2;
+				paramIndex++;
 			} else if (status === 'scheduled') {
-				// 未發布（排程）：schedule_at > NOW() AND schedule_at != 2286-01-01（排除草稿）
-				conditions.push(`schedule_at > $${paramIndex} AND schedule_at != $${paramIndex + 1}`);
+				// 未發布（排程）：schedule_at > NOW()（排除草稿，因為草稿是 NULL）
+				conditions.push(`schedule_at > $${paramIndex}`);
 				params.push(now);
-				params.push(new Date('2286-01-01'));
-				paramIndex += 2;
+				paramIndex++;
 			}
 		}
 
@@ -166,14 +164,18 @@ router.get('/', PERMISSION_MIDDLEWARE.manageNotices, async (req: Request, res: R
 		const total = parseInt(countResult.rows[0].total, 10);
 
 		// 查詢列表（按 pin DESC, pin_order ASC, created_at DESC）
-		const result: QueryResult = await pool.query(
-			`SELECT id, title, content, schedule_at, pin, pin_order, category, publisher, hashtags, creator, created_at, updated_at
+		let query = `SELECT id, title, content, schedule_at, pin, pin_order, category, publisher, hashtags, creator, created_at, updated_at
 			 FROM test_schema.notices
 			 ${whereClause}
-			 ORDER BY pin DESC, pin_order ASC NULLS LAST, created_at DESC
-			 LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
-			[...params, limit, offset]
-		);
+			 ORDER BY pin DESC, pin_order ASC NULLS LAST, created_at DESC`;
+
+		let queryParams = [...params];
+		if (!isGetAll) {
+			query += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+			queryParams.push(limit, offset);
+		}
+
+		const result: QueryResult = await pool.query(query, queryParams);
 
 		successResponse(res, {
 			data: result.rows.map(formatNoticeResponse),
@@ -256,7 +258,17 @@ router.post(
 					title, content, schedule_at, pin, pin_order, category, publisher, hashtags, creator
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 				RETURNING id, title, content, schedule_at, pin, pin_order, category, publisher, hashtags, creator, created_at, updated_at`,
-				[title, content, normalizedScheduleAt, pin, pinOrder, category || null, publisher || null, JSON.stringify(hashtagsArray), JSON.stringify(creator)]
+				[
+					title,
+					content,
+					normalizedScheduleAt,
+					pin,
+					pinOrder,
+					category || null,
+					publisher || null,
+					JSON.stringify(hashtagsArray),
+					JSON.stringify(creator),
+				]
 			);
 
 			successResponse(res, formatNoticeResponse(result.rows[0]), 201);
@@ -296,7 +308,7 @@ router.patch(
 
 			// 檢查公告是否存在
 			const existingResult: QueryResult = await pool.query(
-				`SELECT pin, pin_order FROM test_schema.notices WHERE id = $1`,
+				`SELECT pin, pin_order, schedule_at FROM test_schema.notices WHERE id = $1`,
 				[noticeId]
 			);
 
@@ -305,6 +317,10 @@ router.patch(
 			}
 
 			const existingNotice = existingResult.rows[0];
+			const existingScheduleAt = existingNotice.schedule_at ? new Date(existingNotice.schedule_at).getTime() : null;
+			const now = new Date().getTime();
+			const isAlreadyPublished = existingScheduleAt !== null && existingScheduleAt <= now;
+
 			const updates: string[] = [];
 			const params: any[] = [];
 			let paramIndex = 1;
@@ -323,10 +339,23 @@ router.patch(
 			}
 
 			if (scheduleAt !== undefined) {
-				const normalizedScheduleAt = normalizeScheduleAt(scheduleAt);
-				updates.push(`schedule_at = $${paramIndex}`);
-				params.push(normalizedScheduleAt);
-				paramIndex++;
+				let normalizedScheduleAt: Date | null;
+
+				// 如果原公告已發布（schedule_at <= NOW()），且用戶選擇「立即發布」（scheduleAt === 0）
+				// 則保持原值，不更新
+				if (scheduleAt === 0 && isAlreadyPublished) {
+					// 保持原值，不更新 schedule_at
+					normalizedScheduleAt = null; // 標記為不更新
+				} else {
+					// 其他情況正常處理
+					normalizedScheduleAt = normalizeScheduleAt(scheduleAt);
+				}
+
+				if (normalizedScheduleAt !== null) {
+					updates.push(`schedule_at = $${paramIndex}`);
+					params.push(normalizedScheduleAt);
+					paramIndex++;
+				}
 			}
 
 			// 處理 pin 和 pinOrder
@@ -425,10 +454,9 @@ router.delete('/:id', PERMISSION_MIDDLEWARE.manageNotices, async (req: Request, 
 		const noticeId = req.params.id;
 
 		// 先取得要刪除的公告資訊（用於處理 pinOrder）
-		const noticeResult: QueryResult = await pool.query(
-			`SELECT pin, pin_order FROM test_schema.notices WHERE id = $1`,
-			[noticeId]
-		);
+		const noticeResult: QueryResult = await pool.query(`SELECT pin, pin_order FROM test_schema.notices WHERE id = $1`, [
+			noticeId,
+		]);
 
 		if (noticeResult.rows.length === 0) {
 			return errorResponse(res, '公告不存在', 404);
@@ -466,17 +494,20 @@ router.get('/public', async (req: Request, res: Response) => {
 		const search = req.query.search as string;
 		const category = req.query.category as string;
 		const hashtag = req.query.hashtag as string;
+		const pin = req.query.pin as string; // 'true' | 'false' | undefined
 
-		const offset = (page - 1) * limit;
+		// page=0 && limit=0 表示取得所有資料（不分頁）
+		const isGetAll = page === 0 && limit === 0;
+		const offset = isGetAll ? 0 : (page - 1) * limit;
 		const now = new Date();
 
 		// 建立 WHERE 條件（只顯示已發布的公告）
 		const conditions: string[] = [
-			`schedule_at != $1`, // 不是草稿
-			`schedule_at <= $2`, // 已發布（schedule_at <= NOW()）
+			`schedule_at IS NOT NULL`, // 不是草稿
+			`schedule_at <= $1`, // 已發布（schedule_at <= NOW()）
 		];
-		const params: any[] = [new Date('2286-01-01'), now];
-		let paramIndex = 3;
+		const params: any[] = [now];
+		let paramIndex = 2;
 
 		// 搜尋條件（標題、內容、hashtag）
 		if (search) {
@@ -509,6 +540,13 @@ router.get('/public', async (req: Request, res: Response) => {
 			paramIndex++;
 		}
 
+		// 置頂篩選
+		if (pin !== undefined) {
+			conditions.push(`pin = $${paramIndex}`);
+			params.push(pin === 'true');
+			paramIndex++;
+		}
+
 		const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
 		// 查詢總數
@@ -519,14 +557,18 @@ router.get('/public', async (req: Request, res: Response) => {
 		const total = parseInt(countResult.rows[0].total, 10);
 
 		// 查詢列表（按 pin DESC, pin_order ASC, created_at DESC）
-		const result: QueryResult = await pool.query(
-			`SELECT id, title, content, schedule_at, pin, pin_order, category, publisher, hashtags, created_at, updated_at
+		let query = `SELECT id, title, content, schedule_at, pin, pin_order, category, publisher, hashtags, created_at, updated_at
 			 FROM test_schema.notices
 			 ${whereClause}
-			 ORDER BY pin DESC, pin_order ASC NULLS LAST, created_at DESC
-			 LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
-			[...params, limit, offset]
-		);
+			 ORDER BY pin DESC, pin_order ASC NULLS LAST, created_at DESC`;
+
+		let queryParams = [...params];
+		if (!isGetAll) {
+			query += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+			queryParams.push(limit, offset);
+		}
+
+		const result: QueryResult = await pool.query(query, queryParams);
 
 		// 格式化回應（不包含 creator 資訊）
 		const formattedData = result.rows.map((notice: any) => ({
@@ -567,19 +609,17 @@ router.get('/public/latest', async (req: Request, res: Response) => {
 		const result: QueryResult = await pool.query(
 			`SELECT id, title, content, schedule_at, pin, pin_order, category, publisher, hashtags, created_at, updated_at
 			 FROM test_schema.notices
-			 WHERE schedule_at != $1 AND schedule_at <= $2
+			 WHERE schedule_at IS NOT NULL AND schedule_at <= $1
 			 ORDER BY pin DESC, pin_order ASC NULLS LAST, created_at DESC
-			 LIMIT $3`,
-			[new Date('2286-01-01'), now, limit]
+			 LIMIT $2`,
+			[now, limit]
 		);
 
 		// 格式化回應（不包含 creator 資訊，content 截取前 100 字）
 		const formattedData = result.rows.map((notice: any) => ({
 			id: notice.id,
 			title: notice.title,
-			content: notice.content.length > 100 
-				? notice.content.substring(0, 100) + '...' 
-				: notice.content,
+			content: notice.content.length > 100 ? notice.content.substring(0, 100) + '...' : notice.content,
 			scheduleAt: notice.schedule_at ? new Date(notice.schedule_at).getTime() : null,
 			pin: notice.pin || false,
 			pinOrder: notice.pin_order || null,

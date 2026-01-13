@@ -99,7 +99,9 @@ router.get('/', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, res: Res
 		const groupId = req.query.group_id as string;
 		const isDisabled = req.query.is_disabled as string;
 
-		const offset = (page - 1) * limit;
+		// page=0 && limit=0 表示取得所有資料（不分頁）
+		const isGetAll = page === 0 && limit === 0;
+		const offset = isGetAll ? 0 : (page - 1) * limit;
 
 		// 建立 WHERE 條件
 		const conditions: string[] = ['a.is_archived = false']; // 過濾已刪除
@@ -143,8 +145,7 @@ router.get('/', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, res: Res
 		const total = parseInt(countResult.rows[0].total);
 
 		// 查詢列表
-		const result: QueryResult = await pool.query(
-			`SELECT 
+		let query = `SELECT 
 				a.id, a.email, a.name, a.group_id, a.birthday, a.grade,
 				a.is_email_validated, a.is_disabled, a.is_archived,
 				a.created_at, a.updated_at,
@@ -152,10 +153,15 @@ router.get('/', PERMISSION_MIDDLEWARE.manageUsers, async (req: Request, res: Res
 			 FROM test_schema.auth a
 			 LEFT JOIN test_schema.groups g ON a.group_id = g.id
 			 WHERE ${whereClause}
-			 ORDER BY a.created_at DESC
-			 LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
-			[...params, limit, offset]
-		);
+			 ORDER BY a.created_at DESC`;
+
+		let queryParams = [...params];
+		if (!isGetAll) {
+			query += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+			queryParams.push(limit, offset);
+		}
+
+		const result: QueryResult = await pool.query(query, queryParams);
 
 		successResponse(res, {
 			users: result.rows.map(formatUserResponse),
