@@ -7,6 +7,7 @@ import questRoutes from './routes/quest_routes.js';
 import authRoutes from './routes/auth_routes.js';
 import groupRoutes from './routes/group_routes.js';
 import userRoutes from './routes/user_routes.js';
+import noticeRoutes from './routes/notice_routes.js';
 
 dotenv.config();
 
@@ -32,6 +33,8 @@ app.use('/quest', questRoutes);
 app.use('/auth', authRoutes);
 app.use('/auth/users', userRoutes); // 帳號管理 API
 app.use('/groups', groupRoutes);
+app.use('/admin/noticeBoards', noticeRoutes); // 公告管理 API（後台）
+app.use('/notices', noticeRoutes); // 公告公開 API（前台）
 
 app.get('/', (req: Request, res: Response) => {
 	res.send('MathHub API is running...');
